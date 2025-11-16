@@ -1,0 +1,43 @@
+# Dockerfile for SimTool Cache Web Server
+
+FROM python:3.9-slim
+
+WORKDIR /app
+
+# Install system dependencies
+RUN apt-get update && apt-get install -y \
+    gcc \
+    && rm -rf /var/lib/apt/lists/*
+
+# Copy requirements
+COPY requirements/prod.txt .
+
+# Install Python dependencies
+RUN pip install --no-cache-dir -r prod.txt && \
+    pip install --no-cache-dir gunicorn
+
+# Copy application code
+COPY simtool/ ./simtool/
+
+# Create cache directory
+RUN mkdir -p /cache && chmod 755 /cache
+
+# Expose port
+EXPOSE 5000
+
+# Health check
+HEALTHCHECK --interval=30s --timeout=10s --start-period=10s --retries=3 \
+    CMD python -c "import requests; requests.get('http://localhost:5000/health')"
+
+# Default environment variables
+ENV SIM2L_CACHE_SERVER_URL=http://localhost:5000
+ENV FLASK_ENV=production
+
+# Run with Gunicorn
+CMD ["gunicorn", \
+    "-b", "0.0.0.0:5000", \
+    "-w", "4", \
+    "-t", "60", \
+    "--access-logfile", "-", \
+    "--error-logfile", "-", \
+    "simtool.cache_web_server:create_app()"]

@@ -9,3 +9,6 @@ pillow
 scrapbook
 joblib
 nbsphinx
+requests
+flask
+werkzeug

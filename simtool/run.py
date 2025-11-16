@@ -15,6 +15,7 @@ import stat
 import subprocess
 import select
 import traceback
+from .cache_client import CacheClient, CacheClientException
 try:
    from hubzero.submit.SubmitCommand import SubmitCommand
 except ImportError:
@@ -273,33 +274,50 @@ class RunBase:
 
       print("Checking for cached result")
       try:
-         commandArgs = [os.path.join(os.sep,'apps','bin','ionhelperGetArchivedSimToolResult.sh'),
-                        simToolLocation['simToolName'],
-                        simToolLocation['simToolRevision'],
-                        self.inputsPath,
-                        self.outdir]
-         exitCode,commandStdout,commandStderr = self.executeCommand(commandArgs,streamOutput=True,reportErrorExit=False)
+           # Use HTTP cache client instead of ionhelper script
+           cache_client = CacheClient()
+        
+           # Load inputs from file
+           with open(self.inputsPath, 'r') as fp:
+               import yaml
+               inputs = yaml.safe_load(fp)
+        
+           # Get squid ID for these inputs
+           try:
+               squid_id = cache_client.get_squid_id(
+                   simToolLocation['simToolName'],
+                   simToolLocation['simToolRevision'],
+                   inputs
+               )
+            
+               # Check if this squid exists in cache
+               if cache_client.check_squid_exists(squid_id):
+                   exitCode = 0
+                   # Retrieve the cached result
+                   if cache_client.get_archived_result(squid_id, self.outdir):
+                       os.environ['SIM2L_CACHE_SQUID'] = squid_id
+                       exitCode = 0
+                   else:
+                       exitCode = 1
+               else:
+                   exitCode = 1
+           except CacheClientException as e:
+               print(f"Cache operation failed: {e}", file=sys.stderr)
+               exitCode = 1
       except:
          exitCode = 1
          print(traceback.format_exc(),file=sys.stderr)
       else:
-         squidIdPath = os.path.join(self.outdir,'.squidid')
-         if os.path.exists(squidIdPath):
-            if os.path.getsize(squidIdPath) > 0:
-               with open(squidIdPath,'r') as fp:
-                  os.environ['SIM2L_CACHE_SQUID'] = fp.read().strip()
-         else:
-            print(self.outdir)
-            print(os.listdir(self.outdir))
          if exitCode == 0:
             print("Found cached result = %s" % (os.environ.get('SIM2L_CACHE_SQUID','squidId does not exist')))
             if 'SIM2L_CACHE_SQUID' in os.environ:
                try:
-                  sim2LName,sim2LRevision,runHash = os.environ['SIM2L_CACHE_SQUID'].split('/')
+                    squid_id = os.environ['SIM2L_CACHE_SQUID']
+                    sim2LName,sim2LRevision,runHash = squid_id.split('/')
                except:
                   pass
                else:
-                  self.squidId = '/'.join([sim2LName,"r"+sim2LRevision,runHash])
+                    self.squidId = squid_id
 
       self.cached = exitCode == 0
 
@@ -312,13 +330,26 @@ class RunBase:
          with open(argumentsPath,'w') as fp:
             json.dump(remoteAttributes,fp)
 
-      print("Executing simTool: %s" % (os.getenv('SIM2L_CACHE_SQUID')))
+      print("Executing simTool")
       try:
-         commandArgs = [os.path.join(os.sep,'apps','bin','ionhelperRunSimTool.sh'),
-                        simToolLocation['simToolName'],
-                        simToolLocation['simToolRevision'],
-                        self.inputsPath]
-         exitCode,commandStdout,commandStderr = self.executeCommand(commandArgs,streamOutput=True,reportErrorExit=False)
+         # Use HTTP cache client to run simtool
+         cache_client = CacheClient()
+         
+         try:
+            result = cache_client.run_simtool(
+               simToolLocation['simToolName'],
+               simToolLocation['simToolRevision'],
+               self.inputsPath
+            )
+            
+            if result.get('success'):
+               exitCode = 0
+               os.environ['SIM2L_CACHE_SQUID'] = result.get('squid_id', '')
+            else:
+               exitCode = 1
+         except CacheClientException as e:
+            print(f"SimTool execution via cache server failed: {e}", file=sys.stderr)
+            exitCode = 1
       except:
          exitCode = 1
          print(traceback.format_exc(),file=sys.stderr)
@@ -328,11 +359,12 @@ class RunBase:
       self.cached = exitCode == 0
       if self.cached:
          try:
-            sim2LName,sim2LRevision,runHash = os.environ['SIM2L_CACHE_SQUID'].split('/')
+            squid_id = os.environ.get('SIM2L_CACHE_SQUID', '')
+            sim2LName,sim2LRevision,runHash = squid_id.split('/')
          except:
             pass
          else:
-            self.squidId = '/'.join([sim2LName,"r"+sim2LRevision,runHash])
+            self.squidId = squid_id
 
 
    def retrieveTrustedUserResults(self,simToolLocation):
@@ -340,12 +372,18 @@ class RunBase:
 #        Retrieve result from cache
          print("Fetching cached result")
          try:
-            commandArgs = [os.path.join(os.sep,'apps','bin','ionhelperGetArchivedSimToolResult.sh'),
-                           simToolLocation['simToolName'],
-                           simToolLocation['simToolRevision'],
-                           self.inputsPath,
-                           self.outdir]
-            exitCode,commandStdout,commandStderr = self.executeCommand(commandArgs,streamOutput=True,reportErrorExit=False)
+            # Use HTTP cache client to retrieve results
+            cache_client = CacheClient()
+            squid_id = os.environ.get('SIM2L_CACHE_SQUID', '')
+            
+            if squid_id:
+               if cache_client.get_archived_result(squid_id, self.outdir):
+                  exitCode = 0
+               else:
+                  exitCode = 1
+            else:
+               print("No squid ID available", file=sys.stderr)
+               exitCode = 1
          except:
             exitCode = 1
             print(traceback.format_exc(),file=sys.stderr)
@@ -356,17 +394,16 @@ class RunBase:
 #        Retrieve error result from ionhelper delivery
          print("Fetching error result")
          try:
-            commandArgs = [os.path.join(os.sep,'apps','bin','ionhelperLoadSimToolResult.sh'),
-                           self.outdir]
-            exitCode,commandStdout,commandStderr = self.executeCommand(commandArgs,streamOutput=True,reportErrorExit=False)
+            # Error result retrieval - would need to be implemented in cache server
+            # For now, we'll skip this step as it's handled differently with HTTP cache
+            print("Error result handling not yet implemented for HTTP cache", file=sys.stderr)
+            exitCode = 1
          except:
             exitCode = 1
             print(traceback.format_exc(),file=sys.stderr)
          else:
             if exitCode != 0:
                print("Retrieval of failed execution result failed")
-
-
    def processOutputs(self,cache,prerunFiles,
                            trustedExecution=False):
       self.db = DB(self.outname,dir=self.outdir)

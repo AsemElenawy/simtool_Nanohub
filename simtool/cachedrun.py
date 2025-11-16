@@ -15,6 +15,7 @@ import subprocess
 import select
 import traceback
 import yaml
+from .cache_client import CacheClient, CacheClientException
 from .db import DB
 from .experiment import get_experiment
 from .utils import _get_inputs_dict, _get_extra_files, _get_inputFiles
@@ -246,40 +247,52 @@ class CachedRun:
 
       print("Checking for cached result")
       try:
-         if self.inputs:
-            commandArgs = [os.path.join(os.sep,'apps','bin','ionhelperGetArchivedSimToolResult.sh'),
-                           simToolLocation['simToolName'],
-                           simToolLocation['simToolRevision'],
-                           self.inputsPath,
-                           self.outdir]
+         # Use HTTP cache client instead of ionhelper script
+         cache_client = CacheClient()
+         
+         # Load inputs from file
+         if self.inputsPath and os.path.exists(self.inputsPath):
+            with open(self.inputsPath, 'r') as fp:
+               inputs = yaml.safe_load(fp)
          else:
-            commandArgs = [os.path.join(os.sep,'apps','bin','ionhelperGetArchivedSimToolResult.sh'),
-                           simToolLocation['simToolName'],
-                           simToolLocation['simToolRevision'],
-                           self.squidId,
-                           self.outdir]
-         exitCode,commandStdout,commandStderr = self.executeCommand(commandArgs,streamOutput=True,reportErrorExit=False)
+            inputs = {}
+         
+         # Get squid ID for these inputs
+         try:
+            squid_id = cache_client.get_squid_id(
+               simToolLocation['simToolName'],
+               simToolLocation['simToolRevision'],
+               inputs
+            )
+            
+            # Check if this squid exists in cache
+            if cache_client.check_squid_exists(squid_id):
+               exitCode = 0
+               # Retrieve the cached result
+               if cache_client.get_archived_result(squid_id, self.outdir):
+                  os.environ['SIM2L_CACHE_SQUID'] = squid_id
+                  exitCode = 0
+               else:
+                  exitCode = 1
+            else:
+               exitCode = 1
+         except CacheClientException as e:
+            print(f"Cache operation failed: {e}", file=sys.stderr)
+            exitCode = 1
       except:
          exitCode = 1
          print(traceback.format_exc(),file=sys.stderr)
       else:
-         squidIdPath = os.path.join(self.outdir,'.squidid')
-         if os.path.exists(squidIdPath):
-            if os.path.getsize(squidIdPath) > 0:
-               with open(squidIdPath,'r') as fp:
-                  os.environ['SIM2L_CACHE_SQUID'] = fp.read().strip()
-         else:
-            print(self.outdir)
-            print(os.listdir(self.outdir))
          if exitCode == 0:
             print("Found cached result = %s" % (os.environ.get('SIM2L_CACHE_SQUID','squidId does not exist')))
             if 'SIM2L_CACHE_SQUID' in os.environ:
                try:
-                  sim2LName,sim2LRevision,runHash = os.environ['SIM2L_CACHE_SQUID'].split('/')
+                  squid_id = os.environ['SIM2L_CACHE_SQUID']
+                  sim2LName,sim2LRevision,runHash = squid_id.split('/')
                except:
                   pass
                else:
-                  self.squidId = '/'.join([sim2LName,"r"+sim2LRevision,runHash])
+                  self.squidId = squid_id
 
       self.cached = exitCode == 0
 

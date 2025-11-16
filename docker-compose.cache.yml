@@ -1,0 +1,56 @@
+version: '3.8'
+
+services:
+  # SimTool Cache Web Server
+  cache-server:
+    build:
+      context: .
+      dockerfile: Dockerfile.cache
+    container_name: simtool-cache-server
+    ports:
+      - "5000:5000"
+    environment:
+      - FLASK_ENV=production
+      - SIM2L_CACHE_SERVER_URL=http://cache-server:5000
+    volumes:
+      # Mount cache storage - change to your preferred path
+      - cache-data:/cache
+      # Optional: mount for logs
+      - cache-logs:/var/log/simtool
+    restart: unless-stopped
+    networks:
+      - simtool-network
+    healthcheck:
+      test: [ "CMD", "curl", "-f", "http://localhost:5000/health" ]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+
+  # Optional: Nginx reverse proxy for production
+  reverse-proxy:
+    image: nginx:alpine
+    container_name: simtool-cache-proxy
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./nginx.conf:/etc/nginx/nginx.conf:ro
+      # For HTTPS, add your certificates:
+      # - ./certs/cert.pem:/etc/nginx/cert.pem:ro
+      # - ./certs/key.pem:/etc/nginx/key.pem:ro
+    depends_on:
+      - cache-server
+    networks:
+      - simtool-network
+    restart: unless-stopped
+
+volumes:
+  cache-data:
+    driver: local
+  cache-logs:
+    driver: local
+
+networks:
+  simtool-network:
+    driver: bridge
